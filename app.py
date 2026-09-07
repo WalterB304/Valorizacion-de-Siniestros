@@ -254,13 +254,78 @@ if uploaded_file is not None:
             TD_excel = TD_export[cols_orden].fillna("")
             TD_excel.to_excel(writer, sheet_name='Cálculo', index=False, startrow=12, startcol=0)
 
+            # --- APLICACIÓN DE ESTILOS Y COLORES ---
+            ws = writer.sheets['Cálculo']
+
+            # Definición de Paleta de Colores
+            fill_purple = PatternFill(start_color="4C438D", end_color="4C438D", fill_type="solid")  # Morado/Azul Oscuro Encabezados
+            font_white_bold = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+            
+            fill_yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # Amarillo Entradas/Datos Clave
+            font_dark_bold = Font(name="Calibri", size=10, bold=True, color="000000")
+            
+            fill_green = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")   # Verde Claro Cuotas Impagas
+            
+            border_thin = Border(
+                left=Side(style='thin', color='D9D9D9'),
+                right=Side(style='thin', color='D9D9D9'),
+                top=Side(style='thin', color='D9D9D9'),
+                bottom=Side(style='thin', color='D9D9D9')
+            )
+            border_siniestro = Border(
+                top=Side(style='thin', color='000000'),
+                bottom=Side(style='double', color='000000')
+            )
+
+            # Estilo Bloque Izquierdo (Datos Cliente: Col A Morado, Col B Amarillo)
+            for r in range(1, 10):
+                cell_a = ws.cell(row=r, column=1)
+                cell_b = ws.cell(row=r, column=2)
+                cell_a.fill = fill_purple
+                cell_a.font = font_white_bold
+                cell_b.fill = fill_yellow
+                cell_b.font = font_dark_bold
+
+            # Aplicar formato de porcentaje a la tasa anual
+            ws.cell(row=7, column= 2).number_format = "0.##%"    
+
+            # Estilo Bloque Derecho (Resumen Valoración)
+            ws.cell(row=1, column=4).fill = fill_purple
+            ws.cell(row=1, column=4).font = font_white_bold
+            ws.cell(row=1, column=5).fill = fill_yellow
+            ws.cell(row=1, column=5).font = font_dark_bold
+
+            for r in [3, 4, 5]:
+                ws.cell(row=r, column=4).font = font_dark_bold
+                ws.cell(row=r, column=5).font = font_dark_bold
+                if r == 5:
+                    ws.cell(row=r, column=4).border = border_siniestro
+                    ws.cell(row=r, column=5).border = border_siniestro
+
+            # Estilo Encabezados Tabla de Desarrollo (Fila 13)
+            for col_idx in range(1, 10):
+                cell_hdr = ws.cell(row=13, column=col_idx)
+                cell_hdr.fill = fill_purple
+                cell_hdr.font = font_white_bold
+                cell_hdr.alignment = Alignment(horizontal="center", vertical="center")
+
+            # Estilo Filas Tabla de Desarrollo (Aplica verde a las cuotas impagas del siniestro)
+            for row_idx in range(14, 14 + len(TD_export)):
+                df_idx = row_idx - 14
+                es_cuota_morosa = (len(filas_objetivo) > 0) and (df_idx in filas_objetivo)
+                
+                for col_idx in range(1, 10):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.border = border_thin
+                    if es_cuota_morosa:
+                        cell.fill = fill_green
+
             # Ajustar el ancho de las columnas
-            worksheet = writer.sheets['Cálculo']
-            worksheet.column_dimensions['A'].width = 22
-            worksheet.column_dimensions['B'].width = 20
-            worksheet.column_dimensions['D'].width = 22
+            ws.column_dimensions['A'].width = 22
+            ws.column_dimensions['B'].width = 20
+            ws.column_dimensions['D'].width = 22
             for col in ['C', 'E', 'F', 'G', 'H', 'I']:
-                worksheet.column_dimensions[col].width = 15
+                ws.column_dimensions[col].width = 15
 
         # Terminar de construir el archivo
         buffer.seek(0)
@@ -274,7 +339,7 @@ if uploaded_file is not None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary"
         )
-
+        
     except Exception as e:
         st.error(f"Error al procesar el archivo: {e}")
 else:
