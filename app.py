@@ -105,7 +105,7 @@ if uploaded_file is not None:
             
             capital_list.append(cap)
             saldo_list.append(cap - TD.loc[idx, 'amortization'])
-            
+
         TD['Capital'] = capital_list
         TD['balance'] = saldo_list  # Sobrescribimos la columna original 'balance' con nuestro cálculo en cascada
         
@@ -172,6 +172,7 @@ if uploaded_file is not None:
             'Cuota Actual': 'Cuota Valor Actual'
         })
 
+        TD_export['Saldo'] = TD_export['Saldo'].round(4)
         TD_export['Fecha Cuota'] = TD_export['Fecha Cuota'].dt.strftime('%d/%m/%Y')
         TD_export['Fecha Venc.'] = TD_export['Fecha Venc.'].dt.strftime('%d/%m/%Y')
         
