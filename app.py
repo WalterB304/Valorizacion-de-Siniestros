@@ -3,6 +3,7 @@ import numpy as np
 import streamlit as st
 from datetime import datetime, date
 import io
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 
 st.set_page_config(page_title="Valorización de Seguro de Crédito", layout="wide")
 
