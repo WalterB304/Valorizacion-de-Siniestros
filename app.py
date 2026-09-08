@@ -4,7 +4,6 @@ import streamlit as st
 from datetime import datetime, date
 import io
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-import psycopg
 
 st.set_page_config(page_title="Valorización de Seguro de Crédito", layout="wide")
 
@@ -20,50 +19,11 @@ else:
 
 # Sidebar - Parámetros de entrada
 st.sidebar.header("Parámetros de Entrada")
+st.sidebar.text("(*) Valor Obligatorio")
 
-uploaded_file = st.sidebar.file_uploader("Cargar archivo CSV", type=["csv"])
+uploaded_file = st.sidebar.file_uploader("(*) Cargar archivo CSV", type=["csv"])
 
-def limpiar_tasa(valor) -> float:
-    """
-    Convierte cualquier formato de tasa ("7,5%", "0.075", "7.5", "0,075")
-    a un valor flotante decimal estándar (ej. 0.075 para 7.5%).
-    """
-    if pd.isna(valor) or valor is None:
-        return 0.0
-    
-    val_str = str(valor).strip()
-    tiene_porcentaje = '%' in val_str
-    
-    # Remover símbolo %, cambiar comas por puntos y eliminar espacios
-    val_clean = val_str.replace('%', '').replace(',', '.').strip()
-    
-    try:
-        num = float(val_clean)
-    except ValueError:
-        return 0.0
-    
-    # Si traía %, se divide por 100 ("7,5%" -> 7.5 -> 0.075)
-    if tiene_porcentaje:
-        return num / 100.0
-    
-    # Si no traía % pero es mayor a 1, asumimos que está en escala 0-100 ("7.5" -> 0.075)
-    if num > 1.0:
-        return num / 100.0
-    
-    # Si es menor o igual a 1, ya es un decimal directo ("0.075" -> 0.075)
-    return num
-
-query = """
-    SELECT 
-        "Nro Operación CMF", 
-        "rut", 
-        "nombre", 
-        "Fecha Repertorio", 
-        "Tasa emisión", 
-        "Inversionista Actual" 
-    FROM "Base Bruta"
-    WHERE "Nro Operación CMF" = %s;
-"""
+ID_CONSORCIO = "6081e33547d36d680a75ddbb"
 
 if uploaded_file is not None:
     try:
@@ -73,44 +33,26 @@ if uploaded_file is not None:
         partes_nombre = [p.strip() for p in nombre_archivo_raw.split('-')]
         id_operacion_default = partes_nombre[-1] if partes_nombre and len(partes_nombre[-1]) >= 8 else ""
 
-        id_operacion = st.sidebar.text_input(
-            "ID de Operación",
-            value=id_operacion_default
-        )
-
-        #Busqueda del id_operación
-        with psycopg.connect(**st.secrets["postgres"]) as conn:
-            with conn.cursor() as cur:
-                cur.execute(query, [id_operacion])
-                colnames = [desc[0] for desc in cur.description]
-                records = cur.fetchall()
-                df_bd= pd.DataFrame(records,columns=colnames)
-
-        if df_bd.empty:
-            st.sidebar.error("⚠️ ID incorrecto. No se encontraron registros en la base de datos.")
-            st.stop()  # Detiene el resto del script hasta que el usuario cambie el ID
-
-        else:
-            row_bd = df_bd.iloc[0]
-
-            rut_def = str(row_bd["rut"])
-            nombre_def = str(row_bd["nombre"])
-            fec_otorga_default = pd.to_datetime(row_bd["Fecha Repertorio"]).date()
-            tasa_def = limpiar_tasa(row_bd["Tasa emisión"])
-            inversor_def = str(row_bd["Inversionista Actual"])
+        # Extraer la fecha de otorgamiento por defecto (YYYYMMDD)
+        fec_otorga_default = date.today()
+        if len(id_operacion_default) >= 8:
+            try:
+                fec_otorga_default = datetime.strptime(id_operacion_default[:8], "%Y%m%d").date()
+            except (ValueError, AttributeError):
+                fec_otorga_default = date.today()
 
         # Datos Sidebar
         tasa_anual = st.sidebar.number_input(
-            "Tasa de Interés Anual (Ej. 5,00 para 5,00%)",
-            min_value=0.0,
-            max_value=100.0,
-            value= tasa_def*100,
-            step=0.01,
+            "(*) Tasa de Interés Anual (Ej. 5,00 para 5,00%)",
+            min_value=0.0000,
+            max_value=100.00,
+            value=0.0,
+            step=0.0100,
             format="%.2f"
-        ) / 100
+        )/100
 
         fecha_valoracion = st.sidebar.date_input(
-            "Fecha de Valoración al:",
+            "(*) Fecha de Valoración al:",
             value=fecha_defecto,
             format = "DD/MM/YYYY"
         )
@@ -163,7 +105,7 @@ if uploaded_file is not None:
             
             capital_list.append(cap)
             saldo_list.append(cap - TD.loc[idx, 'amortization'])
-            
+
         TD['Capital'] = capital_list
         TD['balance'] = saldo_list  # Sobrescribimos la columna original 'balance' con nuestro cálculo en cascada
         
@@ -173,7 +115,8 @@ if uploaded_file is not None:
         monto_otorgado = TD['Capital'][0]
         
         # Determinar número de cuotas (4 para Consorcio, 6 estándar)
-        n_cuotas = 4 if inversor_def == "CONSORCIO" else 6
+        investor_actual = str(TD['investorId'].dropna().iloc[-1]) if not TD['investorId'].dropna().empty else ""
+        n_cuotas = 4 if investor_actual == ID_CONSORCIO else 6
 
         #Modificar n° de cuotas
         n_cuotas = st.sidebar.number_input(
@@ -190,8 +133,7 @@ if uploaded_file is not None:
         TD['Cuota Actual'] = np.nan
         saldo_insoluto = 0.0
         cuotas_impagas_sum = 0.0
-
-        filas_objetivo = []
+        
         if pd.notna(idx_inicio):
             pos_inicio = TD.index.get_loc(idx_inicio)
             filas_objetivo = TD.index[pos_inicio : pos_inicio + n_cuotas]
@@ -251,6 +193,11 @@ if uploaded_file is not None:
 
         st.sidebar.header("Datos Cliente")
 
+        id_operacion = st.sidebar.text_input(
+            "ID de Operación",
+            value=id_operacion_default
+        )
+
         fecha_otorgamiento = st.sidebar.date_input(
             "Fecha de Otorgamiento:",
             value=fec_otorga_default,
@@ -258,18 +205,14 @@ if uploaded_file is not None:
         )
 
         nombre_cliente = st.sidebar.text_input(
-            "Nombre Cliente",
-            value= nombre_def
-        )
+            "Nombre Cliente")
 
         n_RUT = st.sidebar.text_input(
-            "RUT",
-            value= rut_def
-        )
+            "RUT")
 
         inv = st.sidebar.text_input(
             "Inversionista",
-            value= inversor_def
+            value= 'Consorcio 'if investor_actual == ID_CONSORCIO else ""
         )
 
         # EXPORTACIÓN A EXCEL
@@ -398,7 +341,7 @@ if uploaded_file is not None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary"
         )
-
+        
     except Exception as e:
         st.error(f"Error al procesar el archivo: {e}")
 else:
