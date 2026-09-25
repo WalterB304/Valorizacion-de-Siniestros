@@ -1,0 +1,486 @@
+import pandas as pd
+import numpy as np
+import streamlit as st
+from datetime import datetime, date
+import io
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+import psycopg
+from generar_carta import generar_word
+
+st.set_page_config(page_title="Valorización de Seguro de Crédito", layout="wide")
+
+st.title("🏦 Valorización de Créditos Morosos")
+st.markdown("Suba el archivo CSV del crédito para calcular automáticamente el valor del siniestro.")
+
+# --- Cálculo de la fecha por defecto (día 10 del mes siguiente) ---
+hoy = date.today()
+if hoy.month == 12:
+    fecha_defecto = date(hoy.year + 1, 1, 10)
+else:
+    fecha_defecto = date(hoy.year, hoy.month + 1, 10)
+
+# Sidebar - Parámetros de entrada
+st.sidebar.header("Parámetros de Entrada")
+
+uploaded_file = st.sidebar.file_uploader("Cargar archivo CSV", type=["csv"])
+
+def limpiar_tasa(valor) -> float:
+    """
+    Convierte cualquier formato de tasa ("7,5%", "0.075", "7.5", "0,075")
+    a un valor flotante decimal estándar (ej. 0.075 para 7.5%).
+    """
+    if pd.isna(valor) or valor is None:
+        return 0.0
+    
+    val_str = str(valor).strip()
+    tiene_porcentaje = '%' in val_str
+    
+    # Remover símbolo %, cambiar comas por puntos y eliminar espacios
+    val_clean = val_str.replace('%', '').replace(',', '.').strip()
+    
+    try:
+        num = float(val_clean)
+    except ValueError:
+        return 0.0
+    
+    # Si traía %, se divide por 100 ("7,5%" -> 7.5 -> 0.075)
+    if tiene_porcentaje:
+        return num / 100.0
+    
+    # Si no traía % pero es mayor a 1, asumimos que está en escala 0-100 ("7.5" -> 0.075)
+    if num > 1.0:
+        return num / 100.0
+    
+    # Si es menor o igual a 1, ya es un decimal directo ("0.075" -> 0.075)
+    return num
+
+query = """
+    SELECT 
+        "Nro Operación CMF", 
+        "rut", 
+        "nombre", 
+        "Fecha Repertorio", 
+        "Tasa emisión", 
+        "Inversionista Actual" 
+    FROM "Base Bruta"
+    WHERE "Nro Operación CMF" = %s;
+"""
+
+query2 = """
+    SELECT 
+        "investor_id",
+        "short_name"
+    FROM investors
+    WHERE investor_id = %s;
+"""
+
+if uploaded_file is not None:
+    try:
+
+        # Extraer ID por defecto desde el nombre del archivo
+        nombre_archivo_raw = uploaded_file.name.rsplit('.', 1)[0]
+        partes_nombre = [p.strip() for p in nombre_archivo_raw.split('-')]
+        id_operacion_default = partes_nombre[-1] if partes_nombre and len(partes_nombre[-1]) >= 8 else ""
+
+        id_operacion = st.sidebar.text_input(
+            "ID de Operación",
+            value=id_operacion_default
+        )
+
+        #Busqueda del id_operación
+        with psycopg.connect(**st.secrets["postgres"]) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, [id_operacion])
+                colnames = [desc[0] for desc in cur.description]
+                records = cur.fetchall()
+                df_bd= pd.DataFrame(records,columns=colnames)
+
+        if df_bd.empty:
+            st.sidebar.error("⚠️ ID incorrecto. No se encontraron registros en la base de datos.")
+            st.stop()  # Detiene el resto del script hasta que el usuario cambie el ID
+
+        else:
+            row_bd = df_bd.iloc[0]
+
+            rut_def = str(row_bd["rut"])
+            nombre_def = str(row_bd["nombre"])
+            fec_otorga_default = pd.to_datetime(row_bd["Fecha Repertorio"]).date()
+            tasa_def = limpiar_tasa(row_bd["Tasa emisión"])
+
+        # Datos Sidebar
+        tasa_anual = st.sidebar.number_input(
+            "Tasa de Interés Anual (Ej. 5,00 para 5,00%)",
+            min_value=0.0,
+            max_value=100.0,
+            value= tasa_def*100,
+            step=0.01,
+            format="%.2f"
+        ) / 100
+
+        fecha_valoracion = st.sidebar.date_input(
+            "Fecha de Valoración al:",
+            value=fecha_defecto,
+            format = "DD/MM/YYYY"
+        )
+
+        # Leer el CSV
+        try:
+            # Detectar separador automáticamente (; o ,)
+            df = pd.read_csv(uploaded_file, sep=None, engine='python')
+        except Exception:
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, sep=';', engine='python')
+
+        # Extraer columnas requeridas
+        if 'isGraceMonth' not in df.columns:
+            df['isGraceMonth'] = False
+
+        TD = df[['paymentNumber', 'dueDate', 'interest', 'amortization', 'balance', 'isPaid', 'isGraceMonth', 'investorId']].copy()
+
+        #Obtener nombre del inversionista
+        investor_actual = str(TD['investorId'].dropna().iloc[-1]) if not TD['investorId'].dropna().empty else ""
+        with psycopg.connect(**st.secrets["postgres"]) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query2, [investor_actual])
+                colnames = [desc[0] for desc in cur.description]
+                records = cur.fetchall()
+                df_bd= pd.DataFrame(records,columns=colnames)
+        inv_bd = df_bd.iloc[0]
+        inversor_def = str(inv_bd["short_name"])
+
+        # Convertir números si vienen con coma decimal (ej: "7,973994" -> 7.973994)
+        for col in ['interest', 'amortization', 'balance']:
+            s_clean = TD[col].astype(str).str.replace(',', '.', regex=False).str.strip()
+            TD[col] = pd.to_numeric(s_clean, errors='coerce')
+
+        # Convertir fechas (dayfirst=True soporta tanto DD-MM-YYYY como YYYY-MM-DD)
+        # Convertir fechas detectando si el formato es ISO (YYYY-MM-DD) o Latino (DD-MM-YYYY)
+        s_date_str = TD['dueDate'].astype(str).str.strip()
+        sample_date = s_date_str.dropna().iloc[0] if not s_date_str.dropna().empty else ""
+
+        if len(sample_date) >= 4 and sample_date[:4].isdigit():
+            # Formato YYYY-MM-DD (Año primero)
+            TD['dueDate'] = pd.to_datetime(s_date_str)
+        else:
+            # Formato DD-MM-YYYY o DD/MM/YYYY (Día primero)
+            TD['dueDate'] = pd.to_datetime(s_date_str, dayfirst=True)
+        
+        # 1. La Cuota es Interés + Amortización
+        TD['monthlyPayment'] = TD['interest'] + TD['amortization']
+        
+        # Columnas calculadas de estructura
+        TD['fecha_cuota'] = TD['dueDate'].dt.to_period('M').dt.to_timestamp('M') - pd.offsets.MonthEnd(1)
+        
+        # 2. Calcular Capital y Saldo en cascada (fila por fila)
+        capital_list = []
+        saldo_list = []
+        
+        for idx in range(len(TD)):
+            if idx == 0:
+                # Primer valor de capital = amortización + saldo (de esa fila)
+                cap = TD.loc[idx, 'amortization'] + TD.loc[idx, 'balance']
+            else:
+                # Desde la segunda fila: capital anterior - amortización anterior
+                cap = capital_list[-1] - TD.loc[idx - 1, 'amortization']
+            
+            capital_list.append(cap)
+            saldo_list.append(cap - TD.loc[idx, 'amortization'])
+            
+        TD['Capital'] = capital_list
+        TD['balance'] = saldo_list  # Sobrescribimos la columna original 'balance' con nuestro cálculo en cascada
+        
+        # Obtener plazo y periodos de gracia
+        plazo_credito = int(TD['paymentNumber'].max())
+        periodos_gracia = int(df['isGraceMonth'].fillna(False).astype(bool).sum())
+        monto_otorgado = TD['Capital'][0]
+        
+        # Determinar número de cuotas (6 para Consorcio, 8 estándar)
+        n_cuotas = 6 if inversor_def == "6081e33547d36d680a75ddbb" else 8
+
+        #Modificar n° de cuotas
+        n_cuotas = st.sidebar.number_input(
+            "N° de cuotas a Valor Presente",
+            min_value= 1,
+            max_value= 360,
+            value= n_cuotas,
+            step= 1
+        )
+        
+        # Buscar primera cuota impaga sin gracia
+        idx_inicio = TD[(TD['isPaid'] != True) & (TD['isGraceMonth'] != True)].index.min()
+        
+        TD['Cuota Actual'] = np.nan
+        saldo_insoluto = 0.0
+        cuotas_impagas_sum = 0.0
+
+        filas_objetivo = []
+        if pd.notna(idx_inicio):
+            pos_inicio = TD.index.get_loc(idx_inicio)
+            filas_objetivo = TD.index[pos_inicio : pos_inicio + n_cuotas]
+            
+            # Capitalización diaria
+            f_val = pd.Timestamp(fecha_valoracion)
+            tasa_diaria = (1 + tasa_anual) ** (1 / 360) - 1
+            dias = (f_val - TD.loc[filas_objetivo, 'dueDate']).dt.days
+            
+            TD.loc[filas_objetivo, 'Cuota Actual'] = (
+                TD.loc[filas_objetivo, 'monthlyPayment'] * (1 + tasa_diaria) ** dias
+            )
+            
+            cuotas_impagas_sum = TD.loc[filas_objetivo, 'Cuota Actual'].sum()
+            saldo_insoluto = TD.loc[filas_objetivo[-1], 'balance']
+        
+        total_siniestro = cuotas_impagas_sum + saldo_insoluto
+        
+        # Mostrar Métricas / Resumen del Siniestro
+        st.subheader("📊 Resumen de la Valoración")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Tasa Anual", f"{tasa_anual*100:,.2f}%")
+        col2.metric("Cuotas Impagas Actualizadas", f"{cuotas_impagas_sum:,.4f}")
+        col3.metric("Saldo Insoluto", f"{saldo_insoluto:,.4f}")
+        col4.metric("TOTAL SINIESTRO", f"{total_siniestro:,.4f}")
+        
+        # Formatear la tabla de desarrollo para presentación/exportación
+        TD_export = TD.rename(columns={
+            'paymentNumber': 'N° Cuota',
+            'fecha_cuota': 'Fecha Cuota',
+            'dueDate': 'Fecha Venc.',
+            'monthlyPayment': 'Cuota',
+            'interest': 'Interés',
+            'amortization': 'Amortización',
+            'balance': 'Saldo',
+            'Cuota Actual': 'Cuota Valor Actual'
+        })
+
+        TD_export['Saldo'] = TD_export['Saldo'].round(4)
+        TD_export['Fecha Cuota'] = TD_export['Fecha Cuota'].dt.strftime('%d/%m/%Y')
+        TD_export['Fecha Venc.'] = TD_export['Fecha Venc.'].dt.strftime('%d/%m/%Y')
+        
+        cols_orden = ['N° Cuota', 'Fecha Cuota', 'Fecha Venc.', 'Capital', 'Cuota', 'Interés', 'Amortización', 'Saldo', 'Cuota Valor Actual']
+        
+        st.subheader("📋 Tabla de Desarrollo")
+        st.dataframe(TD_export[cols_orden].style.format({
+            'Capital': '{:,.4f}',
+            'Cuota': '{:,.4f}',
+            'Interés': '{:,.4f}',
+            'Amortización': '{:,.4f}',
+            'Saldo': '{:,.4f}',
+            'Cuota Valor Actual': '{:,.4f}'
+        }), 
+        use_container_width=True,
+        hide_index=True
+        )
+
+        st.sidebar.header("Datos Cliente")
+
+        fecha_otorgamiento = st.sidebar.date_input(
+            "Fecha de Otorgamiento:",
+            value=fec_otorga_default,
+            format="DD/MM/YYYY"
+        )
+
+        nombre_cliente = st.sidebar.text_input(
+            "Nombre Cliente",
+            value= nombre_def
+        )
+
+        n_RUT = st.sidebar.text_input(
+            "RUT",
+            value= rut_def
+        )
+
+        inv = st.sidebar.text_input(
+            "Inversionista",
+            value= inversor_def
+        )
+
+        # EXPORTACIÓN A EXCEL
+        st.markdown("---")
+        st.subheader("📥 Exportar Resultados")
+        
+        buffer_xl = io.BytesIO()
+        
+        with pd.ExcelWriter(buffer_xl, engine='openpyxl') as writer:
+            
+            # 1. Datos del Cliente y Crédito (Bloque Izquierdo - Columnas A y B)
+            df_resumen_izq = pd.DataFrame({
+                "Parámetro": [
+                    "ID de Operación", "Nombre Cliente", "RUT", "Inversionista", 
+                    "Fecha Otorgamiento", "Monto Otorgado", "Tasa Emisión", 
+                    "Plazo (meses)", "Períodos de Gracia"
+                ],
+                "Valor": [
+                    id_operacion, nombre_cliente, n_RUT, inv, 
+                    fecha_otorgamiento.strftime('%d/%m/%Y'), round(capital_list[0], 2), 
+                    tasa_anual, plazo_credito, periodos_gracia
+                ]
+            })
+            df_resumen_izq.to_excel(writer, sheet_name='Cálculo', index=False, header=False, startrow=0, startcol=0)
+            
+            # 2. Resumen de Valoración y Siniestro (Bloque Derecho - Columnas D y E)
+            df_resumen_der = pd.DataFrame({
+                "Parámetro": [
+                    "Valorización al:", "", "Saldo Insoluto", 
+                    "Cuotas Impagas Actualiz.", "VALOR SINIESTRO"
+                ],
+                "Valor": [
+                    fecha_valoracion.strftime('%d/%m/%Y'), "", 
+                    round(saldo_insoluto, 4), round(cuotas_impagas_sum, 4), 
+                    round(total_siniestro, 4)
+                ]
+            })
+            df_resumen_der.to_excel(writer, sheet_name='Cálculo', index=False, header=False, startrow=0, startcol=3)
+            
+            # 3. Exportar Tabla de Desarrollo (Empieza en la Fila 13)
+            TD_excel = TD_export[cols_orden].fillna("")
+            TD_excel.to_excel(writer, sheet_name='Cálculo', index=False, startrow=12, startcol=0)
+
+            # --- APLICACIÓN DE ESTILOS Y COLORES ---
+            ws = writer.sheets['Cálculo']
+
+            # Definición de Paleta de Colores
+            fill_purple = PatternFill(start_color="4C438D", end_color="4C438D", fill_type="solid")  # Morado/Azul Oscuro Encabezados
+            font_white_bold = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+            
+            fill_yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # Amarillo Entradas/Datos Clave
+            font_dark_bold = Font(name="Calibri", size=10, bold=True, color="000000")
+            
+            fill_green = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")   # Verde Claro Cuotas Impagas
+            
+            border_thin = Border(
+                left=Side(style='thin', color='D9D9D9'),
+                right=Side(style='thin', color='D9D9D9'),
+                top=Side(style='thin', color='D9D9D9'),
+                bottom=Side(style='thin', color='D9D9D9')
+            )
+            border_siniestro = Border(
+                top=Side(style='thin', color='000000'),
+                bottom=Side(style='double', color='000000')
+            )
+
+            # Estilo Bloque Izquierdo (Datos Cliente: Col A Morado, Col B Amarillo)
+            for r in range(1, 10):
+                cell_a = ws.cell(row=r, column=1)
+                cell_b = ws.cell(row=r, column=2)
+                cell_a.fill = fill_purple
+                cell_a.font = font_white_bold
+                cell_b.fill = fill_yellow
+                cell_b.font = font_dark_bold
+
+            # Aplicar formato de porcentaje a la tasa anual
+            ws.cell(row=7, column= 2).number_format = "0.##%"    
+
+            # Estilo Bloque Derecho (Resumen Valoración)
+            ws.cell(row=1, column=4).fill = fill_purple
+            ws.cell(row=1, column=4).font = font_white_bold
+            ws.cell(row=1, column=5).fill = fill_yellow
+            ws.cell(row=1, column=5).font = font_dark_bold
+
+            for r in [3, 4, 5]:
+                ws.cell(row=r, column=4).font = font_dark_bold
+                ws.cell(row=r, column=5).font = font_dark_bold
+                if r == 5:
+                    ws.cell(row=r, column=4).border = border_siniestro
+                    ws.cell(row=r, column=5).border = border_siniestro
+
+            # Estilo Encabezados Tabla de Desarrollo (Fila 13)
+            for col_idx in range(1, 10):
+                cell_hdr = ws.cell(row=13, column=col_idx)
+                cell_hdr.fill = fill_purple
+                cell_hdr.font = font_white_bold
+                cell_hdr.alignment = Alignment(horizontal="center", vertical="center")
+
+            # Estilo Filas Tabla de Desarrollo (Aplica verde a las cuotas impagas del siniestro)
+            for row_idx in range(14, 14 + len(TD_export)):
+                df_idx = row_idx - 14
+                es_cuota_morosa = (len(filas_objetivo) > 0) and (df_idx in filas_objetivo)
+                
+                for col_idx in range(1, 10):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.border = border_thin
+                    if es_cuota_morosa:
+                        cell.fill = fill_green
+
+            # Ajustar el ancho de las columnas
+            ws.column_dimensions['A'].width = 22
+            ws.column_dimensions['B'].width = 20
+            ws.column_dimensions['D'].width = 22
+            for col in ['C', 'E', 'F', 'G', 'H', 'I']:
+                ws.column_dimensions[col].width = 15
+
+        # Terminar de construir el archivo
+        buffer_xl.seek(0)
+        
+        # Generar Buffer del Documento Word (Carta de Siniestro)
+        buffer_word = generar_word(
+            id_operacion=id_operacion,
+            nombre_cliente=nombre_cliente,
+            rut_cliente=n_RUT,
+            inversionista_clave=inv,
+            monto_siniestro=total_siniestro
+        )
+
+        # Estilos personalizados para los botones de Excel (Verde) y Word (Azul)
+        st.markdown("""
+            <style>
+            /* Botón de Excel (Columna 1) -> Verde */
+            div[data-testid="stColumn"]:nth-of-type(1) button {
+                background-color: #358C32 !important;
+                border: 1px solid #358C32 !important;
+            }
+            div[data-testid="stColumn"]:nth-of-type(1) button * {
+                color: #FFFFFF !important;
+            }
+            div[data-testid="stColumn"]:nth-of-type(1) button:hover {
+                background-color: #1D6524 !important;
+                border: 1px solid #1D6524 !important;
+            }
+            div[data-testid="stColumn"]:nth-of-type(1) button:hover * {
+                color: #FFFFFF !important;
+            }
+
+            /* Botón de Word (Columna 2) -> Azul */
+            div[data-testid="stColumn"]:nth-of-type(2) button {
+                background-color: #255BD1 !important;
+                border: 1px solid #255BD1 !important;
+            }
+            div[data-testid="stColumn"]:nth-of-type(2) button * {
+                color: #FFFFFF !important;
+            }
+            div[data-testid="stColumn"]:nth-of-type(2) button:hover {
+                background-color: #0D30A6 !important;
+                border: 1px solid #0D30A6 !important;
+            }
+            div[data-testid="stColumn"]:nth-of-type(2) button:hover * {
+                color: #FFFFFF !important;
+            }
+            </style>
+        """, unsafe_allow_html=True)
+
+        # Botones de descarga organizados en 2 columnas
+        col_excel, col_word = st.columns(2)
+
+        with col_excel:
+            nombre_excel = f"Valorizacion {nombre_def if nombre_def else 'Credito'}.xlsx"
+            st.download_button(
+                label="📊 Descargar Excel Completo",
+                data=buffer_xl,
+                file_name=nombre_excel,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+        with col_word:
+            nombre_word = f"Aviso de Siniestro {nombre_def if nombre_def else 'Credito'}.docx"
+            st.download_button(
+                label="📄 Descargar Carta de Siniestro (.docx)",
+                data=buffer_word,
+                file_name=nombre_word,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True
+            )
+
+    except Exception as e:
+        st.error(f"Error al procesar el archivo: {e}")
+else:
+    st.info("Por favor, suba un archivo CSV en el panel de la izquierda para comenzar.")

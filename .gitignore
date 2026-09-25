@@ -1,0 +1,8 @@
+# Credenciales de base de datos
+.streamlit/secrets.toml
+
+# Caché de Python y archivos temporales
+__pycache__/
+*.pyc
+.venv/
+venv/
