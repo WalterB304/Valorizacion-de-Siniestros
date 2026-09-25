@@ -1,0 +1,6 @@
+streamlit
+pandas
+numpy
+openpyxl
+psycopg[binary]
+python-docx
