@@ -6,6 +6,7 @@ import io
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 import psycopg
 from generar_carta import generar_word
+import os
 
 st.set_page_config(page_title="Valorización de Seguro de Crédito", layout="wide")
 
@@ -54,6 +55,26 @@ def limpiar_tasa(valor) -> float:
     # Si es menor o igual a 1, ya es un decimal directo ("0.075" -> 0.075)
     return num
 
+def get_postgres_config() -> dict:
+    """
+    Obtiene las credenciales de PostgreSQL.
+    Busca primero en st.secrets (Local) y si no existe, en las Variables de Entorno (Railway).
+    """
+    try:
+        if "postgres" in st.secrets:
+            return dict(st.secrets["postgres"])
+    except Exception:
+        pass
+
+    # Si no hay secrets.toml, lee desde Railway
+    return {
+        "host": os.environ.get("POSTGRES_HOST"),
+        "port": int(os.environ.get("POSTGRES_PORT", 5432)),
+        "dbname": os.environ.get("POSTGRES_DB"),
+        "user": os.environ.get("POSTGRES_USER"),
+        "password": os.environ.get("POSTGRES_PASSWORD"),
+    }
+
 query = """
     SELECT 
         "Nro Operación CMF", 
@@ -88,7 +109,7 @@ if uploaded_file is not None:
         )
 
         #Busqueda del id_operación
-        with psycopg.connect(**st.secrets["postgres"]) as conn:
+        with psycopg.connect(**get_postgres_config()) as conn:
             with conn.cursor() as cur:
                 cur.execute(query, [id_operacion])
                 colnames = [desc[0] for desc in cur.description]
