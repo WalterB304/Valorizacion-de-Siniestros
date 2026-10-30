@@ -87,14 +87,6 @@ query = """
     WHERE "Nro Operación CMF" = %s;
 """
 
-query2 = """
-    SELECT 
-        "investor_id",
-        "short_name"
-    FROM investors
-    WHERE investor_id = %s;
-"""
-
 if uploaded_file is not None:
     try:
 
@@ -158,17 +150,6 @@ if uploaded_file is not None:
             df['isGraceMonth'] = False
 
         TD = df[['paymentNumber', 'dueDate', 'interest', 'amortization', 'balance', 'isPaid', 'isGraceMonth']].copy()
-
-        #Obtener nombre del inversionista
-        # investor_actual = str(TD['investorId'].dropna().iloc[-1]) if not TD['investorId'].dropna().empty else ""
-        # with psycopg.connect(**st.secrets["postgres"]) as conn:
-        #     with conn.cursor() as cur:
-        #         cur.execute(query2, [investor_actual])
-        #         colnames = [desc[0] for desc in cur.description]
-        #         records = cur.fetchall()
-        #         df_bd= pd.DataFrame(records,columns=colnames)
-        # inv_bd = df_bd.iloc[0]
-        # inversor_def = str(inv_bd["short_name"])
 
         # Convertir números si vienen con coma decimal (ej: "7,973994" -> 7.973994)
         for col in ['interest', 'amortization', 'balance']:
