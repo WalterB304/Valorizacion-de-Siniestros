@@ -1,10 +1,10 @@
 import pandas as pd
 import numpy as np
 import streamlit as st
-from datetime import datetime, date
+from datetime import date
 import io
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-import psycopg
+import psycopg2 as psycopg
 from generar_carta import generar_word
 import os
 
@@ -127,6 +127,7 @@ if uploaded_file is not None:
             nombre_def = str(row_bd["nombre"])
             fec_otorga_default = pd.to_datetime(row_bd["Fecha Repertorio"]).date()
             tasa_def = limpiar_tasa(row_bd["Tasa emisión"])
+            inversor_def = str(row_bd["Inversionista Actual"])
 
         # Datos Sidebar
         tasa_anual = st.sidebar.number_input(
@@ -156,18 +157,18 @@ if uploaded_file is not None:
         if 'isGraceMonth' not in df.columns:
             df['isGraceMonth'] = False
 
-        TD = df[['paymentNumber', 'dueDate', 'interest', 'amortization', 'balance', 'isPaid', 'isGraceMonth', 'investorId']].copy()
+        TD = df[['paymentNumber', 'dueDate', 'interest', 'amortization', 'balance', 'isPaid', 'isGraceMonth']].copy()
 
         #Obtener nombre del inversionista
-        investor_actual = str(TD['investorId'].dropna().iloc[-1]) if not TD['investorId'].dropna().empty else ""
-        with psycopg.connect(**st.secrets["postgres"]) as conn:
-            with conn.cursor() as cur:
-                cur.execute(query2, [investor_actual])
-                colnames = [desc[0] for desc in cur.description]
-                records = cur.fetchall()
-                df_bd= pd.DataFrame(records,columns=colnames)
-        inv_bd = df_bd.iloc[0]
-        inversor_def = str(inv_bd["short_name"])
+        # investor_actual = str(TD['investorId'].dropna().iloc[-1]) if not TD['investorId'].dropna().empty else ""
+        # with psycopg.connect(**st.secrets["postgres"]) as conn:
+        #     with conn.cursor() as cur:
+        #         cur.execute(query2, [investor_actual])
+        #         colnames = [desc[0] for desc in cur.description]
+        #         records = cur.fetchall()
+        #         df_bd= pd.DataFrame(records,columns=colnames)
+        # inv_bd = df_bd.iloc[0]
+        # inversor_def = str(inv_bd["short_name"])
 
         # Convertir números si vienen con coma decimal (ej: "7,973994" -> 7.973994)
         for col in ['interest', 'amortization', 'balance']:
@@ -216,7 +217,7 @@ if uploaded_file is not None:
         monto_otorgado = TD['Capital'][0]
         
         # Determinar número de cuotas (6 para Consorcio, 8 estándar)
-        n_cuotas = 6 if inversor_def == "6081e33547d36d680a75ddbb" else 8
+        n_cuotas = 6 if inversor_def == "CONSORCIO VIDA" else 8
 
         #Modificar n° de cuotas
         n_cuotas = st.sidebar.number_input(
